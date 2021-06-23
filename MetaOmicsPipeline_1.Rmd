@@ -1,0 +1,307 @@
+---
+title: "MetaOmicsPipeline.Rmd"
+author: "Liam Friar; University of Colorado, Boulder"
+date: "Spring, 2021"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(eval = FALSE)
+knitr::opts_chunk$set(engine.opts = list(bash = "-l"))
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+Note that I have set eval=FALSE globally so that the output of code blocks will, by default, not display. At the start of a block of code, can set eval=TRUE. For instance {r, eval=TRUE} . Alternatively, can press a little green arrow on the right side of the start of the chunk (in RStudio) to run that code. It looks like running code line by line does not work well nor save files. I am really just using R Markdown as a convenient way to put code into simple markdown.
+
+Some sections are bash commands. Some are R commands. Hopefully I make that clear at the beginning of each section. Paths etc. probably need to be changed depending on the computer running this code.
+
+More notes and bits of code exist in MetaGPipeline.R, mifaser_AnalysisPipeline.R, PipelineCode.docx, and Notes.docx . I have not made a markdown file for the mifaser analyses because this would take a fair amount of time and effort and I am not sure whether we will need that analysis.
+
+## Some useful code throughout
+
+R:
+``` {r r-useful}
+setwd("/Users/username/working/directory/")
+```
+bash:
+``` {bash bash-useful}
+#Access remote server
+ssh username@Remote-IP-Address
+#Copy from remote server to local (call from local)
+scp file.txt remote_username@IP-Address:/remote/directory
+#Copy from local to remote server (call from local)
+scp remote_username@IP-Address:file.txt /local/directory
+#convert fastq to fasta
+gzcat sample.fq.gz | awk '0 == ((NR+3) % 4)*((NR+2) % 4)' | sed -n 's/^@/>/;p' > out/path/sample.fasta
+#Checked that output has half as many lines as input, and used head to check that lines looked correct.
+# For my system, the “done” message does not appear until I type my next command.
+
+```
+
+## Workflow Summary
+
+This is the basic order of the analyses contained here. Before anything, set your working directory!!!
+
+1. **Fastqc and Trimmomatic** (can be done on kbase)
+  - Quality filter and trim raw reads.
+2. **MEGAHIT** (can be done on kbase)
+  - Assemble reads into contigs, scaffolds, and/or MAGs
+  - Alternative assemblers: metaSPAdes
+3. **eggNOG-mapper** (can use online version if >100k sequences to annotate)
+  - Multifunctional contig annotation tool
+  - http://eggnog-mapper.embl.de/
+  - Alternative functional annotation: mi-faser
+    - mi-faser uses individual reads instead of contigs and we could not figure out how to aggregate the output from mi-faser in a useful way.
+4. **BBMap**
+  - Determines coverage of assembled contigs
+5. **R analysis**
+  - Use BBMap and eggNOG-mapper outputs to create abundance tables of reads and contigs assigned to COG categories in each sample
+6. **Beta Diversity Analysis**
+  - Not yet written
+    
+
+## Fastqc and Trimmomatic (bash)
+
+Fastqc characterizes the quality of reads. Input fastq. Output html. Run before and after trimming.
+Trimmomatic quality filters and trims raw reads. Input fastq files. Output fastq files.
+
+bash:
+``` {bash fastqc_trimmomatic}
+#In bash
+conda install -c bioconda trimmomatic
+conda install -c bioconda fastqc
+
+#Run fastqc
+fastqc <inputFiles> -o <outputDir>
+
+#(Optional) If you have paired-end reads in a single file that alternates forward and reverse reads (like if you downloaded .fastq from KBase), use the following code to split into 2 fastq files. The order will be maintained so that paired reads match up. This is how trimmomatic needs the input files.
+awk '0 == ((NR+4) % 8)*((NR+5) % 8)*((NR+6) % 8)*((NR+7) %8)' file.fastq > file_1.fastq
+awk '0 == (NR % 8)*((NR+1) % 8)*((NR+2) % 8)*((NR+3) %8)' file.fastq > file_2.fastq 
+
+#Run trimmomatic
+# Input: paired or single end fastq. Four output fastq.gz: F/R paired/unpaired
+# http://www.usadellab.org/cms/?page=trimmomatic
+
+trimmomatic PE input_R1.fastq input_R2.fastq output_F_trimmed_paired.fq.gz output_F_trimmed_unpaired.fq.gz output_R_trimmed_paired.fq.gz output_R_trimmed_unpaired.fq.gz ILLUMINACLIP:~/anaconda3/pkgs/trimmomatic-0.39-1/share/trimmomatic-0.39-1/adapters/NexteraPE-PE.fa:2:30:10:2:keepBothReads SLIDINGWINDOW:4:28 LEADING:3 TRAILING:3 MINLEN:90
+#2:30:10:2 has to do with how aggressive adapter clipping is, and I believe these are the defaults. Note that I did not use tophred33 or tophred66 because trimmomatic once called says that phred33 is detected, and on kbase I was checking a box to convert from phred64 to phred33, so I think phred33 is what I want.
+# PE specifies paired-end. Can run for single end.
+#Note that path to adapter must be specified. For me, it is in <~/anaconda3/pkgs/trimmomatic-0.39-1/share/trimmomatic-0.39-1/adapters/NexteraPE-PE.fa>
+
+```
+
+## MEGAHIT (bash)
+
+MEGAHIT assembles reads into contigs, scaffolds, and MAGs. When we use MEGAHIT (or metaSPAdes) on our metaG datasets, we end up with all contigs in a single bin for each sample. So, we are using the contigs as our output. Input: trimmed read files. Output: <final.contigs.fa> fasta of assembled contigs (among other outputs)
+
+bash:
+
+``` {bash megahit}
+#the outputs of trimmomatic are gzipped fastq files and can go straight into megahit. megahit can also take fasta and fastq inputs. Forward paired reads are in a list after -1, reverse paired reads are in a list (in same order) after -2 and unpaired reads follow -r. Note that lists of files in any of these fields are comma separated WITH NO SPACES.
+megahit -1 trimmed_paired_1.fq.gz -2 trimmed_paired_2.fq.gz -r trimmed_unpaired_1.fq.gz,trimmed_unpaired_2.fq.gz -o /output/directory/
+
+```
+
+## eggNOG-mapper
+
+eggNOG-mapper takes the megahit-assembled contigs as a fasta file (final.contigs.fa) and annotates. We are particularly interested in the broad COG categories that eggNOG-mapper assigns. There is a local version of eggNOG-mapper, which is necessary to run for files greater than 100k sequences. We ran the online version (http://eggnog-mapper.embl.de/). If you run online, you will receive an email after you submit a new job. You must use the link in that email to actual begin the job. Otherwise it will remain queued on the remote server.
+
+If you do want to run on local, these are my notes. I stopped the program running so I do not know for sure that it would have completed successfully.
+
+bash:
+```{bash eggNOG-mapper}
+#install latest version (https://github.com/eggnogdb/eggnog-mapper/wiki/eggNOG-mapper-v2.1.0#v211)
+#move to appropriate place and activate conda (I moved it to inside ~/anaconda3/envs/GlacierTranscriptomics/).
+$ unzip eggnog-mapper-v2.1.0.zip #Or whatever filename is
+$ conda install --file requirements.txt #from within the unzipped folder
+$ download_eggnog_data.py -M #There are other flags for databases required for other approaches (-M needed for metagenomic, I believe).
+#The conda install gives bundled versions of some programs that the github wiki for the program warns may not be ideal. So, I downloaded one of the subsidiary packages on its own. I am not 100% sure of the following steps as I tried to recreate them after the fact and could not find them in terminal.
+$ conda install -c conda-forge -c bioconda mmseqs2
+# Follow the instructions on the github wiki for adding folders to the PATH.
+# Now, run it. Has to be called with python.
+$ python path/to/eggnog-mapper-2.1.0-1/emapper.py -m mmseqs --itype metagenome -i path/to/final.contigs.fa -o path/to/eggNOG_out
+
+```
+
+## BBMap
+
+bash:
+``` {bash BBMap}
+#install
+$ conda install -c bioconda bbmap
+$ conda install -c bioconda samtools
+#Note that the bbmap package contains many functions that are called separately, as opposed to being a single function with options like many of the packages used thus far. I believe these functions can be called from anywhere because they are in the conda environment.
+
+bbwrap.sh ref=THIS_SAMPLE_final.contigs.fa in=path/to/THIS_SAMPLE_F_trimmed_paired.fq.gz,path/to/THIS_SAMPLE_F_trimmed_unpaired.fq.gz,path/to/THIS_SAMPLE_R_trimmed_unpaired.fq.gz  in2=path/to/THIS_SAMPLE_R_trimmed_paired.fq.gz,null,null out=path/to/bbmap.sam.gz append
+#Without append flag, the output from each input file will overwrite the output from previous inputs.
+# output folder “ref” contains an indexed version of the reference contig set. Bbwrap.sh can reuse this as its index depending on how it is called (if I resend this exact command, it will reuse the index. I think I could also not input a ref).
+$ pileup.sh in=bbmap.sam.gz out=coverage.txt
+
+```
+
+## COG Analysis
+
+This code can be easily run through MetaGPipeline.R . Make sure to change sample names, foldernames, etc. and not to overwrite existing files.
+
+Using the contigs from MEGAHIT, the coverage determined by BBMap, and the COG category assignments from eggNOG-mapper, determine the relative abundances of contigs and reads assigned to various COG categories in various samples. These relative abundances will then be used to do beta diversity analyses.
+
+The bottom of MetaGPipeline.R contains some more code to identify contigs that are highly covered according to BBMap, but not present in the eggNOG-mapper output. In one sample, CAA-003, the most highly covered contigs were much less likely to be present than a randomly chosen contig would be. The distribution was more consistent for other samples so I stopped looking at this phenomenon.
+
+R:
+``` {r COG_Analysis}
+###########################################################
+##############Build contig-COG-coverage table##############
+###########################################################
+#Create a table with contig ID, COG category, and coverage depth
+#by matching contig IDs from eggNOG-mapper and bbmap
+#Create a second table only containing contigs covered above some threshold.
+
+sample_names = c("CAA-003", "TYR-006", "COH21", "CAA-CL-2", "TYR-ICE-2", "COH-CL-3")
+n_samples = length(sample_names)
+
+for (samp in 1 : n_samples) {
+  #Load tables
+  foldername = paste0 ( "metaG/megahit_out/", sample_names[ samp ], "/bbmap_out/" )
+  bbmap_out = read.table( paste0( foldername, "coverage.txt" ), header = FALSE,
+                          sep = "\t", quote = ""  )
+  #Added .tsv extenstion to query_seqs.fa.emapper.annotations by hand because file wouldn't open in Excel.
+  #In the analysis of the cryoconite hole metaG data, I used a version of query_seqs.fa.emapper files with a .tsv extension added by hand that allows them to be opened in Excel. the files seem to open identically in R with or without the extension, so I got rid of the .tsv extention for the glacial metaG data.
+  foldername = paste0( "./metaG/eggNOG_out/", sample_names[ samp ], "/" )
+  eggNOG_out = read.table( paste0( foldername, "query_seqs.fa.emapper.annotations"), header = FALSE,
+                           sep = "\t", quote = "" )
+  
+  #Create table (mean_coverage) containing contig id and mean coverage from BBMap output
+  n_contigs = nrow( bbmap_out )
+  mean_coverage = data.frame( matrix( data = NA, nrow = n_contigs, ncol = 2 ) )
+  colnames(mean_coverage) = c("contig", "coverage")
+  for ( con in 1 : n_contigs ) {
+    mean_coverage[ con, 1 ] = strsplit( bbmap_out[ con, 1 ], " " )[[1]][1]
+    mean_coverage[ con, 2 ] = bbmap_out[ con, 2 ]
+  }
+  
+  #Create table (COG_coverage) with contig ID, COG category from eggNOG mapper, coverage from BBMap
+  n_contigs_eggNOG = nrow( eggNOG_out )
+  COG_coverage = data.frame( matrix( data = 0, nrow = n_contigs_eggNOG, ncol = 3 ) )
+  colnames( COG_coverage ) = c( "contig", "COG", "coverage" )
+  COG_coverage$contig = eggNOG_out[,1] 
+  COG_coverage$COG = eggNOG_out[,21]
+  #check that all contigs from eggNOG_out are in bbmap_out
+  uncovered_contigs = which( !(COG_coverage$contig %in% mean_coverage$contig))
+  print(paste0("Indices of uncovered contigs = ", uncovered_contigs, ". Should be blank") )
+  #Match coverage and COG using contig ids from each table
+  for ( con in 1 : n_contigs_eggNOG ) {
+    COG_coverage$coverage[ con ] = round( mean_coverage$coverage[ mean_coverage$contig == COG_coverage$contig[ con ] ], 1 )
+  }
+  #I believe the above loop would kick a "replacement has length zero" error
+  #if COG_coverage$contig[ con ] were not in mean_coverage$contig
+  
+  #Now, filter contigs by a minimum mean coverage depth.
+  coverage_thresh = 5
+  COG_coverage_filtered = subset( COG_coverage, COG_coverage$coverage >= 5 )
+  #Save tables
+  foldername = paste0("metaG/eggNOG_out/", sample_names[ samp ], "/" )
+  #write.table( COG_coverage, file = paste0( foldername, "COG_coverage.tsv"),
+  #                                          row.names = FALSE, col.names = TRUE, sep = "\t" )
+  #write.table( COG_coverage_filtered, file = paste0( foldername, "COG_coverage_filtered_5.tsv"),
+  #             row.names = FALSE, col.names = TRUE, sep = "\t" )
+}
+
+#####################################################################################
+#######Count contigs assigned to COG categories assigned by eggNOG-mapper############
+#####################################################################################
+#Set weight_by_coverage below!!!
+#Count contigs assigned to each COG category in each sample.
+weight_by_coverage = 0 # 1 or 0. if 0 each contig assigned to a COG category
+#is counted once. If 1, the mean coverage of each contig assigned to a COG category is counted.
+#In either case, if a contig is assigned to multiple COGs, it is fully counted for each COG.
+sample_names = c("CAA-003", "TYR-006", "COH21", "CAA-CL-2", "TYR-ICE-2", "COH-CL-3")
+n_samples = length(sample_names)
+COG_cats = c("J", "A", "K", "L", "B", "D", "Y", "V", "T", "M", "N", "Z", "W", "U", "O", "X",
+             "C", "G","E", "F", "H", "I", "P", "Q", "R", "S", "Unassigned")
+#COG_cats from https://www.ncbi.nlm.nih.gov/research/cog# and click "COG CATEGORIES"
+
+#Create table COG_counts that will count the number of contigs assigned to a given COG category (row)
+#for each sample (column)
+COG_counts = data.frame( matrix( data = 0, nrow = length(COG_cats), ncol = n_samples))
+rownames(COG_counts) = COG_cats
+colnames(COG_counts) = sample_names
+
+for (samp in 1 : n_samples) {
+  foldername = paste0("metaG/eggNOG_out/", sample_names[ samp ], "/" )
+  COG_coverage = read.table(paste0(foldername, "COG_coverage_filtered_5.tsv"),
+                                            header = TRUE, sep = "\t" )
+  COG_col = COG_coverage$COG
+  #This column contains the assigned COG category. Some reads are assigned multiple COGs.
+
+  for ( read in 1: length( COG_col) ) {
+    assigned_COG = COG_col[ read ]
+    if ( nchar( assigned_COG ) == 1 ) {
+      if ( !( assigned_COG %in% COG_cats) ) {
+        print("Error: assigned COG not in list")
+      }
+      COG_counts[ COG_cats == assigned_COG, samp] = COG_counts[ COG_cats == assigned_COG, samp] + COG_coverage$coverage[read]^weight_by_coverage
+      
+    } else if ( nchar( assigned_COG ) == 0 ) {
+      COG_counts[ COG_cats == "Unassigned", samp] = COG_counts[ COG_cats == "Unassigned", samp] + COG_coverage$coverage[read]^weight_by_coverage
+      
+    } else if ( nchar( assigned_COG > 1 ) ) {
+      #This could just be "else", but I want to check this all works as expected.
+      for ( char in strsplit( assigned_COG, "" )[[1]] ) {
+        if ( !( char %in% COG_cats) ) {
+          print("Error: assigned COG not in list")
+        }
+        COG_counts[ COG_cats == char, samp] = COG_counts[ COG_cats == char, samp] + COG_coverage$coverage[read]^weight_by_coverage
+      }
+      
+    } else {
+      print("Error: number assigned cogs does not make sense.")
+    }
+  }
+}
+
+#Add relative abundance columns such that the sum of relative abundances for a sample (column) = 1
+for ( samp in 1 : ncol( COG_counts ) ) {
+  rel_abundance = round( COG_counts[ , samp] / sum(COG_counts[ , samp] ), 3)
+  COG_counts$newCol = rel_abundance
+  colnames(COG_counts)[ colnames(COG_counts) == "newCol"] = paste0( colnames(COG_counts)[samp], "_rel" ) 
+}
+
+#write.table(COG_counts, file = "./metaG/eggNOG_out/COGCountsBySample_filtered_5.tsv", sep = "\t")
+#write.table(COG_counts, file = "./metaG/eggNOG_out/COGCountsBySample_byCoverage_filtered_5.tsv", sep = "\t")
+
+
+```
+
+## MetaPhlAn
+
+Metaphaln is developed by the Huttenhower Lab at Harvard. It uses curated marker genes to assign reads phylogenetically. I input trimmed and filtered reads (the trimmomatic outputs), but I think raw reads would be fine. If run from a bowtie2out that has already been created (as in the example I give), it runs in a couple of minutes versus maybe half an hour to a couple of hours.
+
+https://github.com/biobakery/biobakery/wiki/metaphlan3
+
+bash:
+``` {bash metaphlan }
+conda install -c bioconda python=3.7 metaphlan
+
+#Run with default parameters on trimmed reads from a sample. Metaphlan treats paired end reads as independent of each other, so in this case, it is like 4 fastq files that could be totally unrelated to each other. --bowtie2out saves the bowtie2 mapping file which can then be reused if we want to run metaphlan with different parameters on the same data (see below).
+CAN62_F_trimmed_paired.fq.gz,CAN62_F_trimmed_unpaired.fq.gz,CAN62_R_trimmed_paired.fq.gz,CAN62_R_trimmed_unpaired.fq.gz --bowtie2out ../../metaphlan_out/CAN62/metagenome.bowtie2.bz2 --nproc 5 --input_type fastq -o ../../metaphlan_out/CAN62/profiled_metagenome.txt
+
+#I believe MetaPhlAn's database is not great for environmental samples. members of the lab recommend lowering the stat_q (def 0.2) and min_mapq_val (def 5) values for environmental samples. I am not sure how low they can go and still produce valid results. Note that this uses the bowtie2 output from the previous run.
+./CAN62/metagenome.bowtie2.bz2 --input_type bowtie2out --stat_q 0.1 --min_mapq_val 4 -o ./CAN62_loose/profiled_metagenome.txt
+# --min_mapq_val of 4 means there is a threshold that a mapped read must have at least a 60% chance of being correctly mapped, while the default 5 means at least a 68% chance. I do not know what –stat_q does.
+
+```
+
+## Prokka
+Prokka is pretty simple to run. Look at the different outputs. There is a lot of information!
+
+bash:
+``` {bash prokka}
+#Not sure how I installed. conda install if possible as always. Input final.contigs.fa is the output of megahit in this case. prokka works with contigs.
+prokka --outdir ./prokka_out/ final.contigs.fa
+
+```
