@@ -1,0 +1,223 @@
+---
+author: "Joy Buongiorno"
+title: "GlacierOmics ordination. Spring 2021"
+output: html_document
+goal: To calculate diversity metrics and generate NMDS plots with weighted and unweighted
+  distance metric for eggNOG annotations of metagenomes across glacial and cryoconite environments.
+---
+
+```{r setup, include=FALSE, cache = F}
+knitr::opts_chunk$set(error = TRUE)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r get dir}
+getwd() 
+```
+
+```{r load libraries}
+library(dplyr)
+library(janitor) 
+library(ggplot2)
+library(vegan)
+library(ggpubr)
+library(ggrepel)
+library(tibble)
+library(scales)
+library(MASS)
+library(RColorBrewer)
+library(missForest)
+library(plotly)
+library(janitor)
+```
+
+First, let us read in the raw data
+```{r upload raw data}
+raw<- read.csv("COGCountsBySample_byCoverage_filtered_5.csv")[ ,1:7]
+View(raw)
+nrow(raw)
+ncol(raw)
+```
+
+Next, the relative data
+```{r upload relative data}
+rel<-read.csv("COGCountsBySample_byCoverage_filtered_5.csv")
+rel<-rel[ ,-c(2:7)]
+View(rel)
+nrow(rel)
+ncol(rel)
+```
+
+Poking around
+```{r totals}
+raw<-adorn_totals(raw, where=c("row", "col"))
+raw$COG
+```
+
+```{r boxplot}
+hist(raw$Total, breaks=111, main="frequency of COG abundance") #data is not normal, but that is fine for nMDS
+boxplot(raw[-c(1,8)], main="counts per sample")
+```
+
+```{r Calculate diversity}
+colnames(raw)
+COG_div<-vegan:::diversity(t(raw[,-c(1,8)]), index ="shannon")
+COG_div<-as.data.frame(COG_div)
+View(COG_div)
+COG_div<-cbind(rownames(COG_div), data.frame(COG_div, row.names=NULL))
+COG_div$`rownames(COG_div)`
+names(COG_div)[1] <- "Sample"
+plot(COG_div~Sample, data = COG_div, main="Shannon")
+glacier_names<-c("Canada", "Taylor", "Commonwealth", "Canada", "Taylor", "Commonwealth")
+sample_type<-c("Cryoconite_hole", "Cryoconite_hole", "Cryoconite_hole", "Glacial_ice", "Glacial_ice", "Glacial_ice")
+COG_div$Glacier<-glacier_names
+COG_div$Sample_type<-sample_type
+boxplot(COG_div~Glacier, data = COG_div, main="Shannon")
+boxplot(COG_div~Sample_type, data = COG_div,main ="Shannon")
+```
+Create distance matrix
+```{r bray, unweighted}
+set.seed(2987)
+rownames(raw)<-raw$COG
+raw$COG<-NULL
+raw_t<-t(raw)
+View(raw_t)
+colnames(raw_t)
+rownames(raw_t)
+raw_t<-raw_t[-c(6:7), -c(27:28)] # remove total row and COH.CL.3 sample
+raw_metaMDS_bray<- metaMDS(comm= raw_t, distance="bray",binary=TRUE,trymax = 100 ,autotransform=FALSE, k=2, trace = TRUE)
+```
+
+```{r basic plots bray, unweighted}
+stressplot(raw_metaMDS_bray)
+raw_metaMDS_bray$stress
+plot(raw_metaMDS_bray, display = "sites", type = "n")
+points(raw_metaMDS_bray, display = "sites", col="red", cex=1.25)
+text(raw_metaMDS_bray, display="sites")
+```
+
+```{r prep unw bray data}
+pts1<-raw_metaMDS_bray$points[,1]
+pts2<-raw_metaMDS_bray$points[,2]
+raw_unbray<-data.frame(MDS1=pts1, MDS2=pts2)
+raw_unbray$Sample<-rownames(raw_unbray)
+raw_unbray_types<-left_join(raw_unbray, COG_div, by="Sample")
+```
+
+```{r plot nice unw bray}
+ggplot(raw_unbray_types, aes(x=MDS1,y=MDS2,shape=Sample_type))+
+  scale_shape_manual(values=seq(21,25))+
+  geom_label_repel(label=raw_unbray_types$Sample, 
+    check_overlap = T)+
+geom_point(aes(fill=Glacier), size = 4, show.legend=TRUE)+ #can change to raw_unbray_types$Sample_type
+#scale_fill_gradient(low="black", high="yellow") +
+  xlab("NMDS1") +
+  ylab("NMDS2") +
+  theme(text = element_text(size=14))+
+  labs(title="Bray, unweighted") 
+```
+Now for weighted Bray
+
+Create distance matrix
+```{r bray, weighted}
+raw_metaMDS_bray_w<- metaMDS(comm= raw_t, distance="bray",binary=FALSE,trymax = 100 ,autotransform=FALSE, k=2, trace = TRUE)
+```
+
+```{r basic plots bray, weighted}
+stressplot(raw_metaMDS_bray_w)
+raw_metaMDS_bray_w$stress
+plot(raw_metaMDS_bray_w, display = "sites", type = "n")
+points(raw_metaMDS_bray_w, display = "sites", col="red", cex=1.25)
+text(raw_metaMDS_bray_w, display="sites")
+```
+
+```{r prep w bray data}
+pts1<-raw_metaMDS_bray_w$points[,1]
+pts2<-raw_metaMDS_bray_w$points[,2]
+raw_bray_w<-data.frame(MDS1=pts1, MDS2=pts2)
+raw_bray_w$Sample<-rownames(raw_bray_w)
+raw_bray_w_types<-left_join(raw_bray_w, COG_div, by="Sample")
+```
+
+```{r plot nice w bray}
+ggplot(raw_bray_w_types, aes(x=MDS1,y=MDS2,shape=Sample_type))+
+  scale_shape_manual(values=seq(21,25))+
+  geom_label_repel(label=raw_bray_w_types$Sample, 
+    check_overlap = T)+
+geom_point(aes(fill=Glacier), size = 4, show.legend=TRUE)+ #can change to raw_bray_w_types$Sample_type
+#scale_fill_gradient(low="black", high="yellow") +
+  xlab("NMDS1") +
+  ylab("NMDS2") +
+  theme(text = element_text(size=14))+
+  labs(title="Bray, weighted") 
+```
+
+Let's try Jaccard
+Create distance matrix
+```{r jaccard, unweighted}
+raw_metaMDS_unw_jaccard<- metaMDS(comm= raw_t, distance="jaccard",binary=TRUE,trymax = 100 ,autotransform=FALSE, k=2, trace = TRUE)
+```
+
+```{r basic plots jaccard, unweighted}
+stressplot(raw_metaMDS_unw_jaccard)
+raw_metaMDS_unw_jaccard$stress
+plot(raw_metaMDS_unw_jaccard, display = "sites", type = "n")
+points(raw_metaMDS_unw_jaccard, display = "sites", col="red", cex=1.25)
+text(raw_metaMDS_unw_jaccard, display="sites")
+```
+
+```{r prep unw jaccard data}
+pts1<-raw_metaMDS_unw_jaccard$points[,1]
+pts2<-raw_metaMDS_unw_jaccard$points[,2]
+raw_unjac<-data.frame(MDS1=pts1, MDS2=pts2)
+raw_unjac$Sample<-rownames(raw_unbray)
+raw_unjac_types<-left_join(raw_unjac, COG_div, by="Sample")
+```
+
+```{r plot nice unw jaccard}
+ggplot(raw_unjac_types, aes(x=MDS1,y=MDS2,shape=Sample_type))+
+  scale_shape_manual(values=seq(21,25))+
+  geom_label_repel(label=raw_unjac_types$Sample, 
+    check_overlap = T)+
+geom_point(aes(fill=Glacier), size = 4, show.legend=TRUE)+ #can change to raw_unjac_types$Sample_type
+#scale_fill_gradient(low="black", high="yellow") +
+  xlab("NMDS1") +
+  ylab("NMDS2") +
+  theme(text = element_text(size=14))+
+  labs(title="Jaccard, unweighted") 
+```
+
+Now weighted Jaccard
+Create distance matrix
+```{r jaccard, weighted}
+raw_metaMDS_jaccard_w<- metaMDS(comm= raw_t, distance="jaccard",binary=FALSE,trymax = 100 ,autotransform=FALSE, k=2, trace = TRUE)
+```
+
+```{r basic plots jaccard, weighted}
+stressplot(raw_metaMDS_jaccard_w)
+raw_metaMDS_jaccard_w$stress
+plot(raw_metaMDS_jaccard_w, display = "sites", type = "n")
+points(raw_metaMDS_jaccard_w, display = "sites", col="red", cex=1.25)
+text(raw_metaMDS_jaccard_w, display="sites")
+```
+
+```{r prep w jaccard data}
+pts1<-raw_metaMDS_jaccard_w$points[,1]
+pts2<-raw_metaMDS_jaccard_w$points[,2]
+raw_jac_w<-data.frame(MDS1=pts1, MDS2=pts2)
+raw_jac_w$Sample<-rownames(raw_unbray)
+raw_jac_w_types<-left_join(raw_jac_w, COG_div, by="Sample")
+```
+
+```{r plot nice w jaccard}
+ggplot(raw_jac_w_types, aes(x=MDS1,y=MDS2,shape=Sample_type))+
+  scale_shape_manual(values=seq(21,25))+
+   geom_label_repel(label=raw_jac_w_types$Sample, 
+    check_overlap = T)+
+geom_point(aes(fill=Glacier), size = 4, show.legend=TRUE)+ #can change to raw_jac_w_types$Sample_type
+#scale_fill_gradient(low="black", high="yellow") +
+  xlab("NMDS1") +
+  ylab("NMDS2") +
+  theme(text = element_text(size=14))+
+  labs(title="Jaccard, weighted") 
+```
